@@ -1,0 +1,80 @@
+[
+  {
+    "available" : 751,
+    "estimatedAtFixRMSE" : 0.6164172292049741,
+    "estimatedRMSE" : 0.7972571992041902,
+    "heldSpeedRMSEOnAvailableSamples" : 0.8272360367604948,
+    "maximumError" : 2.9961052227437435,
+    "predictedSamples" : 0,
+    "rawRMSE" : 0.8224159003777013,
+    "rejectedFixes" : 0,
+    "samples" : 751,
+    "scenario" : "constant-noise",
+    "unavailableSamples" : 0
+  },
+  {
+    "available" : 751,
+    "estimatedAtFixRMSE" : 0.6265603795718725,
+    "estimatedRMSE" : 0.9203044865107501,
+    "heldSpeedRMSEOnAvailableSamples" : 1.2426026737704774,
+    "maximumError" : 6.686810208967614,
+    "predictedSamples" : 0,
+    "rawRMSE" : 0.7303905993435004,
+    "rejectedFixes" : 0,
+    "samples" : 751,
+    "scenario" : "accelerate-brake",
+    "unavailableSamples" : 0
+  },
+  {
+    "available" : 751,
+    "estimatedAtFixRMSE" : 0.6516109338147515,
+    "estimatedRMSE" : 0.8580340757485626,
+    "heldSpeedRMSEOnAvailableSamples" : 1.0260123893778612,
+    "maximumError" : 2.9961052227437417,
+    "predictedSamples" : 0,
+    "rawRMSE" : 0.8224159003777011,
+    "rejectedFixes" : 0,
+    "samples" : 751,
+    "scenario" : "train-high-speed",
+    "unavailableSamples" : 0
+  },
+  {
+    "available" : 751,
+    "estimatedAtFixRMSE" : 0.6374432394605277,
+    "estimatedRMSE" : 0.7920418283369585,
+    "heldSpeedRMSEOnAvailableSamples" : 10.447484600602362,
+    "maximumError" : 2.976357509880767,
+    "predictedSamples" : 36,
+    "rawRMSE" : 10.385447592762208,
+    "rejectedFixes" : 4,
+    "samples" : 751,
+    "scenario" : "gnss-spikes",
+    "unavailableSamples" : 0
+  },
+  {
+    "available" : 682,
+    "estimatedAtFixRMSE" : 0.6356749781700046,
+    "estimatedRMSE" : 1.301151885319875,
+    "heldSpeedRMSEOnAvailableSamples" : 1.1704242359467405,
+    "maximumError" : 7.815761305372433,
+    "predictedSamples" : 20,
+    "rawRMSE" : 0.8455342653838172,
+    "rejectedFixes" : 0,
+    "samples" : 751,
+    "scenario" : "tunnel-handheld",
+    "unavailableSamples" : 69
+  },
+  {
+    "available" : 712,
+    "estimatedAtFixRMSE" : 0.42720378394082964,
+    "estimatedRMSE" : 0.489389707118,
+    "heldSpeedRMSEOnAvailableSamples" : 1.4553697121123788,
+    "maximumError" : 1.1115124277140893,
+    "predictedSamples" : 50,
+    "rawRMSE" : 0.7739608784118455,
+    "rejectedFixes" : 0,
+    "samples" : 751,
+    "scenario" : "tunnel-mounted",
+    "unavailableSamples" : 39
+  }
+]

@@ -1,0 +1,8 @@
+.build/
+.swiftpm/
+DerivedData/
+*.xcuserstate
+xcuserdata/
+*.jsonl
+!Tests/Fixtures/*.jsonl
+.DS_Store

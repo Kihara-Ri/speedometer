@@ -1,0 +1,20 @@
+{
+  "platform": "iOS 27.0 Simulator / iPhone 17 Pro",
+  "inputEvents": 248,
+  "replayedEvents": 248,
+  "speedObservations": 42,
+  "rawSpeedValues": [
+    20
+  ],
+  "rawSpeedAccuracyValues": [
+    -1
+  ],
+  "ingestResults": {
+    "tick": 206,
+    "invalid": 42
+  },
+  "estimateStates": {
+    "unavailable": 248
+  },
+  "note": "simctl supplies speedAccuracy=-1. Invalid accuracy is correctly rejected. This smoke verifies runtime, sensor callbacks, journal and replay rejection path; it does not validate physical speed accuracy."
+}
