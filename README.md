@@ -6,11 +6,14 @@
 
 - 仪表盘实时显示速度，支持 km/h、m/s、mph
 - 最高速度、平均速度、里程统计；显示数据来源、不确定度和数据延迟
-- 状态清晰：实测 / 推算中 / 搜索信号，权限问题给出明确提示
+- 状态清晰：实测 / 推算中 / 静止 / 等待速度，权限问题给出明确提示
 - 自动识别出行方式：乘车（`vehicle`）、步行/跑步/骑行（`independent`），证据不足时为 `unknown`
-- 可选的传感器记录与离线回放，用于调参和复现问题
+- 每次测速自动记录完整传感器和算法数据，停止即保存，支持离线回放和调参
+- 疑似轨道交通重复运行并停稳后，顶部询问是否到站；确认/否认随行程保存，供离线调参（实验功能，需要可靠定位）
 
 ## 原理
+
+静止时结合系统活动、连续运动传感器与稳定位置确认，显示 0，并标注“静止”。未知速度不会直接当零；仅把手机拿稳也不会强制归零。
 
 速度直接取自 Core Location 的多普勒测速（`CLLocation.speed`）及其精度，**不**用相邻经纬度做差分，避免把位置误差放大成速度噪声。在此之上做滤波和合理性检查，信号中断时短暂推算，不可靠时宁可不显示。
 
@@ -24,11 +27,11 @@
 
 `uncertainty` 是模型误差尺度（m/s），尚未标定为统计置信区间。当前参数基于合成场景，真实车载精度还需要真机数据和独立参考速度验证。
 
-详细说明见 [`docs/`](docs)：[算法与参数](docs/algorithm.md) · [调参与回放](docs/tuning.md) · [出行识别](docs/travel-recognition.md)
+详细说明见 [`docs/`](docs)：[算法与参数](docs/algorithm.md) · [调参与回放](docs/tuning.md) · [出行识别](docs/travel-recognition.md) · [到站推测与反馈](docs/rail-arrival.md)
 
 ## 运行
 
-用 Xcode 打开 `Speedometer.xcodeproj`，选择 `Speedometer` scheme，真机运行时在 Signing 中选自己的开发团队。首次启动需允许“精确位置”；出行识别另需“运动与健身”授权（拒绝后仍可测速）。切到后台会暂停采样，回到前台重新确认速度。
+用 Xcode 打开 `Speedometer.xcodeproj`，选择 `Speedometer` scheme，真机运行时在 Signing 中选自己的开发团队。首次启动需允许“精确位置”；出行识别另需“运动与健身”授权（拒绝后仍可测速）。开始测速后切后台或锁屏继续采集，返回前台保留当前行程。系统终止或手动划掉应用会中断本次运行。
 
 ## 测试与回放
 
@@ -36,9 +39,11 @@
 swift test                                  # 单元测试
 swift run speed-replay --benchmark          # 合成场景基准
 swift run speed-replay /abs/path/session.jsonl > estimates.jsonl
+# 在已启动的 iOS 模拟器上核验真实 Model / Service / Journal 的行程保存流程
+python3 tools/test_app_flow.py --device SIMULATOR_UDID
 ```
 
-在 Scheme 的 Run → Arguments 添加 `--record-sensors` 可把传感器数据（不含经纬度）记录到 App 的 Documents，供离线回放。
+打开应用即开始测速并自动记录；停止后点“开始测速并记录”建立新行程。主页面显示记录时长；点“停止并保存”后，可直接“查看本次”。顶部“历史”支持速度/距离曲线、拖动回看、传感器诊断、区间距离推测与铁路距离核对、名称备注、最近删除恢复，以及 JSONL/CSV 导出。详细操作见[手持电车采集与距离核对](docs/train-recording.md)。支持后台与锁屏持续采集；写入失败时明确提示并停止测速。
 
 ## 目录
 

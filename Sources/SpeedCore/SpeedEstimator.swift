@@ -13,6 +13,28 @@ public struct SpeedEstimator: Sendable {
     private var lastMotion: Double?
     private var motionStart: Double?
     private var motionBlockedUntil = -Double.infinity
+    private var lastResult: IngestResult?
+    private var lastInnovation: Double?
+    private var lastNIS: Double?
+    private var stationary = StationaryDetector()
+
+    /// Shared by live capture and replay; invalid GPS velocity is never converted to zero.
+    public mutating func observeStationaryEvidence(_ event: ReplayEvent) {
+        stationary.consume(event)
+    }
+
+    public func diagnostics(at now: Double) -> FilterDiagnostics {
+        var predicted = filter
+        if let state = filter, now >= state.time { predicted?.predict(to: now) }
+        let age = lastFix.map { max(0, now - $0.timestamp) }
+        let base = lastFix.map { max(0.35, $0.speedAccuracy) }
+        let growth = age.map { motionTrusted(at: now) ? hypot(0.35*$0, 0.12*$0*$0) : 0.75*$0*$0 }
+        return FilterDiagnostics(stateTime: filter?.time, state: filter?.x, covariance: filter?.p,
+            lastResult: lastResult, innovation: lastInnovation, nis: lastNIS,
+            reportedSpeedAccuracy: lastFix?.speedAccuracy,
+            uncertaintyFloor: base.flatMap { b in growth.map { hypot(b, $0) } },
+            covarianceSpeedSigma: predicted.map { sqrt($0.p[0][0]) })
+    }
 
     public init(mode: SensorMode = .handheld) { self.mode = mode }
 
@@ -20,6 +42,14 @@ public struct SpeedEstimator: Sendable {
 
     @discardableResult
     public mutating func ingest(_ sample: SpeedObservation, receivedAt now: Double) -> IngestResult {
+        stationary.observeSpeed(sample, at: now)
+        let result = ingestSpeed(sample, receivedAt: now)
+        lastResult = result
+        return result
+    }
+
+    private mutating func ingestSpeed(_ sample: SpeedObservation, receivedAt now: Double) -> IngestResult {
+        lastInnovation = nil; lastNIS = nil
         guard now.isFinite, sample.timestamp.isFinite, sample.timestamp <= now + 0.05 else { return .invalidTime }
         guard now - sample.timestamp <= 2 else { return .stale }
         guard sample.speed.isFinite, (0...140).contains(sample.speed),
@@ -52,6 +82,8 @@ public struct SpeedEstimator: Sendable {
             innovation = predicted.innovation(value, h: [1,0,0], variance: variance)
         }
         let consistent = innovation.residual*innovation.residual / innovation.variance <= 25
+        lastInnovation = innovation.residual
+        lastNIS = innovation.residual*innovation.residual / innovation.variance
         if !physicallyPossible || !consistent {
             // New regime must persist across 3 high-quality fixes. Never let one spike rebase the filter.
             if sample.speedAccuracy <= 1 {
@@ -68,6 +100,12 @@ public struct SpeedEstimator: Sendable {
 
     @discardableResult
     public mutating func ingest(_ sample: MotionObservation, receivedAt now: Double) -> IngestResult {
+        let result = ingestMotion(sample, receivedAt: now)
+        lastResult = result
+        return result
+    }
+
+    private mutating func ingestMotion(_ sample: MotionObservation, receivedAt now: Double) -> IngestResult {
         guard mode == .mounted else { return .ignored }
         guard now.isFinite, sample.timestamp.isFinite, sample.timestamp <= now + 0.05 else { return .invalidTime }
         guard now - sample.timestamp <= 0.25 else { return .stale }
@@ -91,6 +129,10 @@ public struct SpeedEstimator: Sendable {
     }
 
     public func estimate(at now: Double) -> SpeedEstimate {
+        if stationary.confirmed(at: now) {
+            return SpeedEstimate(timestamp: now, speed: 0, uncertainty: nil, state: .predicted,
+                                 source: .stationary, observationAge: stationary.positionAge(at: now))
+        }
         guard now.isFinite, let state = filter, let fix = lastFix, now >= state.time else {
             return unavailable(now, age: nil)
         }
@@ -153,5 +195,117 @@ public struct SpeedEstimator: Sendable {
     private func unavailable(_ now: Double, age: Double?) -> SpeedEstimate {
         SpeedEstimate(timestamp: now.isFinite ? now : 0, speed: nil, uncertainty: nil,
                       state: .unavailable, source: .none, observationAge: age)
+    }
+}
+
+/// Infers a ground stop only from independent, current evidence. A quiet IMU alone
+/// cannot distinguish a parked phone from a phone on a smooth, moving train.
+private struct StationaryDetector: Sendable {
+    private var source: ActivitySource = .waiting
+    private var stationarySince: Double?
+    private var quietSince: Double?
+    private var lastMotionTime = -Double.infinity
+    private var lastMotionReceipt = -Double.infinity
+    private var lastPositionTime = -Double.infinity
+    private var lastPositionReceipt = -Double.infinity
+    private var anchor: (time: Double, latitude: Double, longitude: Double)?
+    private var positionSpan = 0.0
+    private var movingUntil = -Double.infinity
+    private var groundStopConfirmed = false
+
+    mutating func consume(_ event: ReplayEvent) {
+        let now = event.receivedAt
+        guard now.isFinite else { return }
+        defer {
+            if !groundEvidenceValid(at: now) { groundStopConfirmed = false }
+            else if quietWindowReady { groundStopConfirmed = true }
+        }
+        if let value = event.activitySource {
+            if value != .available { self = StationaryDetector() }
+            source = value
+        }
+        if let activity = event.activity,
+           activity.timestamp <= now + 0.05, now - activity.timestamp <= 1 {
+            let stopped = source == .available && activity.confidence == .high && activity.stationary &&
+                !activity.automotive && !activity.walking && !activity.running && !activity.cycling && !activity.unknown
+            if stopped { if stationarySince == nil { stationarySince = now } }
+            else { stationarySince = nil; quietSince = nil }
+        }
+        if let motion = event.rawMotion {
+            let t = motion.timestamp ?? now
+            if t.isFinite, t > lastMotionTime {
+                let timely = t <= now + 0.05 && now - t <= 0.25
+                let quiet = norm(motion.acceleration) <= 0.08 && norm(motion.rotationRate) <= 0.35
+                // Hand motion can break the entry window, but does not by itself
+                // invalidate an established ground stop. Missing data still does.
+                if !timely || t - lastMotionTime > 0.3 { groundStopConfirmed = false }
+                if !norm(motion.acceleration).isFinite || !norm(motion.rotationRate).isFinite {
+                    groundStopConfirmed = false
+                }
+                if !timely || !quiet { quietSince = nil }
+                else if quietSince == nil || t - lastMotionTime > 0.3 { quietSince = t }
+                lastMotionTime = t
+                lastMotionReceipt = timely ? now : -.infinity
+            }
+        }
+        if let speed = event.speed { observeSpeed(speed, at: now) }
+        if let position = event.locationDetails {
+            guard let t = event.speed?.timestamp, t.isFinite, t <= now + 0.05, now - t <= 2,
+                  position.latitude.isFinite, abs(position.latitude) <= 90,
+                  position.longitude.isFinite, abs(position.longitude) <= 180,
+                  let accuracy = position.rawHorizontalAccuracy ?? event.speed?.horizontalAccuracy,
+                  accuracy.isFinite, (0...25).contains(accuracy) else {
+                anchor = nil; positionSpan = 0; lastPositionReceipt = -.infinity
+                return
+            }
+            guard t > lastPositionTime else { return }
+            if let old = anchor, t - lastPositionTime <= 20,
+               distance(old.latitude, old.longitude, position.latitude, position.longitude) <= 6 {
+                positionSpan = t - old.time
+            } else {
+                anchor = (t, position.latitude, position.longitude)
+                positionSpan = 0
+            }
+            lastPositionTime = t; lastPositionReceipt = now
+        }
+    }
+
+    mutating func observeSpeed(_ speed: SpeedObservation, at now: Double) {
+        guard now.isFinite, speed.timestamp.isFinite, speed.timestamp <= now + 0.05,
+              now - speed.timestamp <= 2, speed.speed.isFinite, (0.8...140).contains(speed.speed),
+              speed.speedAccuracy.isFinite, (0...2).contains(speed.speedAccuracy),
+              (0...50).contains(speed.horizontalAccuracy) else { return }
+        movingUntil = now + 30
+        groundStopConfirmed = false
+        anchor = nil; positionSpan = 0
+    }
+
+    func positionAge(at now: Double) -> Double { max(0, now - lastPositionTime) }
+
+    func confirmed(at now: Double) -> Bool {
+        groundStopConfirmed && groundEvidenceValid(at: now)
+    }
+
+    private var quietWindowReady: Bool {
+        guard let quietSince else { return false }
+        return lastMotionTime - quietSince >= 3
+    }
+
+    private func groundEvidenceValid(at now: Double) -> Bool {
+        guard now.isFinite, now >= movingUntil, source == .available,
+              let stationarySince, now - stationarySince >= 3 else { return false }
+        return now >= lastMotionTime && now - lastMotionTime <= 0.3 && now - lastMotionReceipt <= 0.3 &&
+            positionSpan >= 5 && now - lastPositionTime <= 20 && now - lastPositionReceipt <= 20
+    }
+
+    private func norm(_ values: [Double]) -> Double {
+        guard values.count == 3, values.allSatisfy(\.isFinite) else { return .infinity }
+        return hypot(hypot(values[0], values[1]), values[2])
+    }
+
+    private func distance(_ lat1: Double, _ lon1: Double, _ lat2: Double, _ lon2: Double) -> Double {
+        let radians = Double.pi / 180
+        let a = pow(sin((lat2-lat1)*radians/2), 2) + cos(lat1*radians)*cos(lat2*radians)*pow(sin((lon2-lon1)*radians/2), 2)
+        return 6_371_000 * 2 * asin(sqrt(min(1, max(0, a))))
     }
 }

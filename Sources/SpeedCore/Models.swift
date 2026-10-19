@@ -2,7 +2,7 @@ import Foundation
 
 public enum SensorMode: String, Codable, Sendable { case handheld, mounted }
 public enum EstimateState: String, Codable, Sendable { case measured, predicted, unavailable }
-public enum EstimateSource: String, Codable, Sendable { case location, model, inertial, none }
+public enum EstimateSource: String, Codable, Sendable { case location, model, inertial, stationary, none }
 public enum IngestResult: String, Codable, Sendable {
     case accepted, candidate, invalid, invalidTime, stale, outOfOrder, outlier, ignored, untrustedMotion
 }

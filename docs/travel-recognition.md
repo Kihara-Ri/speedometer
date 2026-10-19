@@ -1,5 +1,7 @@
 # 乘车与自主出行识别
 
+2026-10-19 新增独立的[轨道交通到站推测与反馈](rail-arrival.md)：运行周期重复、持续制动和可靠低速支持下才在停稳后提示。原有 vehicle / independent / unknown 分类口径保持不变，疑似轨道交通不等于已证明交通工具类型。
+
 更新日期：2026-10-18。实现见 [TravelModeRecognizer.swift](../Sources/SpeedCore/TravelModeRecognizer.swift)，真机接入见 [SpeedometerService.swift](../iOS/Speedometer/SpeedometerService.swift)。
 
 ## 1. 分类口径
@@ -69,7 +71,7 @@ Apple 活动回调是状态变化事件：先交付当前活动，再在活动�
 | pendingMode | 等待切换确认的目标，可为空 |
 | stationary / cycling | 最新系统活动对应标志，供消费者解释 |
 
-首次活动识别会使用系统“运动与健身”授权。拒绝或硬件不支持时输出 unknown 和原因，定位测速仍能继续。服务约每 0.2 秒检查授权状态；系统活动 nil 回调按 unknown 处理。后台停止活动流，重新开始时重建状态。活动回调带会话 generation 检查，避免上一会话的延迟回调进入新会话。
+首次活动识别会使用系统“运动与健身”授权。拒绝或硬件不支持时输出 unknown 和原因，定位测速仍能继续。服务约每 0.2 秒检查授权状态；系统活动 nil 回调按 unknown 处理。切后台不主动停止活动流或重建状态；显式停止再开始时才重建。活动回调带会话 generation 检查，避免上一会话的延迟回调进入新会话。
 
 当前运动活动流随定位测速服务一同开始：没有定位授权或精确位置时，服务不会单独启动活动识别。它不是后台出行追踪器。电车/摩托车的实际识别效果依赖设备和系统活动分类，不能把 automotive API 的存在当成所有场景已验证。
 

@@ -5,7 +5,7 @@ import SpeedCore
 
 // MARK: - Palette
 
-private enum Palette {
+enum Palette {
     static let top = Color(red: 0.043, green: 0.059, blue: 0.082)
     static let bottom = Color(red: 0.075, green: 0.098, blue: 0.137)
     static let card = Color.white.opacity(0.06)
@@ -22,6 +22,8 @@ struct SpeedometerView: View {
     @Bindable var model: SpeedometerModel
     @AppStorage("speedUnit") private var unitRaw = SpeedUnit.kmh.rawValue
     @Environment(\.openURL) private var openURL
+    @State private var showingRecording = false
+    @State private var reviewURL: URL?
 
     private var unit: SpeedUnit { SpeedUnit(rawValue: unitRaw) ?? .kmh }
     private var speed: Double? { model.estimate?.speed }
@@ -29,6 +31,7 @@ struct SpeedometerView: View {
 
     private var tint: Color {
         guard model.status == .running else { return Palette.idle }
+        if model.estimate?.source == .stationary { return Palette.measured }
         switch state { case .measured: return Palette.measured; case .predicted: return Palette.predicted; case .unavailable: return Palette.idle }
     }
 
@@ -39,10 +42,11 @@ struct SpeedometerView: View {
         case .suspended: return ("已暂停", Palette.idle)
         case .denied, .preciseLocationRequired, .recordingFailed: return ("无法测速", Palette.danger)
         case .running:
+            if model.estimate?.source == .stationary { return ("静止", Palette.measured) }
             switch state {
             case .measured: return ("实测", Palette.measured)
             case .predicted: return ("推算中", Palette.predicted)
-            case .unavailable: return ("搜索信号…", Palette.idle)
+            case .unavailable: return ("等待速度…", Palette.idle)
             }
         }
     }
@@ -67,6 +71,7 @@ struct SpeedometerView: View {
                     .frame(maxWidth: 300, maxHeight: .infinity)
                     .frame(maxWidth: .infinity)
                 unitPicker
+                recordingStatus
                 stats
                 // Notice and details share one fixed-height slot: swapping never moves the layout.
                 Group {
@@ -80,7 +85,17 @@ struct SpeedometerView: View {
             .padding(.bottom, 28)
         }
         .preferredColorScheme(.dark)
+        .overlay(alignment: .top) {
+            if model.isRecording, model.status == .running, let candidate = model.rail?.current {
+                RailArrivalCard(candidate: candidate, respond: model.respondToArrival)
+                    .padding(.horizontal, 16)
+                    .padding(.top, 56)
+                    .transition(.move(edge: .top).combined(with: .opacity))
+            }
+        }
+        .animation(.easeOut(duration: 0.25), value: model.rail?.current?.id)
         .animation(.easeOut(duration: 0.25), value: model.status)
+        .sheet(isPresented: $showingRecording) { RecordingView(model: model, initialRecordingURL: reviewURL) }
     }
 
     // MARK: Sections
@@ -89,6 +104,12 @@ struct SpeedometerView: View {
         HStack {
             Text("测速计").font(.title3.weight(.semibold))
             Spacer()
+            Button { reviewURL = nil; showingRecording = true } label: {
+                Label("历史", systemImage: "clock.arrow.circlepath")
+                    .font(.subheadline)
+                    .foregroundStyle(.white)
+            }
+            .buttonStyle(.bordered)
             HStack(spacing: 6) {
                 Circle().fill(badge.color).frame(width: 8, height: 8)
                 Text(badge.text).font(.subheadline.weight(.medium))
@@ -120,7 +141,7 @@ struct SpeedometerView: View {
         HStack(spacing: 0) {
             DetailItem(title: "数据来源", value: sourceText)
             Divider().frame(height: 28).overlay(Color.white.opacity(0.12))
-            DetailItem(title: "不确定度", value: model.estimate?.uncertainty.map { "±" + String(format: "%.1f", unit.convert($0)) + " " + unit.label } ?? "--")
+            DetailItem(title: "模型不确定度", value: model.estimate?.uncertainty.map { String(format: "%.1f", unit.convert($0)) + " " + unit.label } ?? "--")
             Divider().frame(height: 28).overlay(Color.white.opacity(0.12))
             DetailItem(title: "数据延迟", value: model.estimate?.observationAge.map { String(format: "%.1f s", $0) } ?? "--")
         }
@@ -130,29 +151,46 @@ struct SpeedometerView: View {
 
     private var controls: some View {
         HStack(spacing: 12) {
-            Button(action: model.resetTrip) {
-                Label("重置", systemImage: "arrow.counterclockwise")
-                    .frame(maxWidth: .infinity, minHeight: 52)
-            }
-            .buttonStyle(.bordered).tint(.white)
-            .frame(maxWidth: 120)
-            .disabled(model.distance == 0 && model.peakSpeed == 0)
-
             Button(action: model.toggle) {
-                Label(model.isActive ? "停止测速" : "开始测速",
-                      systemImage: model.isActive ? "stop.fill" : "location.fill")
+                Label(model.isFinalizingRecording ? "正在保存…" : model.isRecording ? "停止并保存" : "开始测速并记录",
+                      systemImage: model.isRecording ? "stop.fill" : "location.fill")
                     .font(.headline)
                     .frame(maxWidth: .infinity, minHeight: 52)
             }
             .buttonStyle(.borderedProminent)
-            .tint(model.isActive ? Palette.danger : Palette.measured)
+            .tint(model.isRecording ? Palette.danger : Palette.measured)
             .foregroundStyle(Color.black)
+            .disabled(model.isFinalizingRecording)
         }
         .controlSize(.large)
         .padding(.top, 4)
     }
 
     // MARK: Derived text
+
+    private var recordingStatus: some View {
+        TimelineView(.periodic(from: .now, by: 1)) { _ in
+            HStack(spacing: 8) {
+                Image(systemName: model.isRecording ? "record.circle.fill" : "checkmark.circle")
+                    .foregroundStyle(model.isRecording ? Palette.danger : Palette.measured)
+                if model.isFinalizingRecording {
+                    Text("正在保存本次行程…")
+                } else if model.isRecording {
+                    Text((model.rail?.isRailLike == true ? "疑似轨道交通 · " : "记录中 · ") + reportTime(model.recordingDuration)).monospacedDigit()
+                } else if model.recordingError != nil {
+                    Text("记录未完整保存").foregroundStyle(Palette.danger)
+                } else if let url = model.lastExport {
+                    Text("本次已保存 · " + reportTime(model.recordingDuration)).monospacedDigit()
+                    Spacer()
+                    Button("查看本次") { reviewURL = url; showingRecording = true }
+                } else {
+                    Text("每次测速自动保存行程").foregroundStyle(.secondary)
+                }
+            }
+            .font(.caption)
+            .frame(maxWidth: .infinity, minHeight: 24, alignment: .leading)
+        }
+    }
 
     private var distanceText: (value: String, unit: String) {
         let meters = model.distance
@@ -169,6 +207,7 @@ struct SpeedometerView: View {
         case .location: return "GNSS 定位"
         case .model: return "模型推算"
         case .inertial: return "惯性辅助"
+        case .stationary: return "静止判定"
         case .none: return "--"
         }
     }
@@ -182,15 +221,15 @@ struct SpeedometerView: View {
             Notice(icon: "location.circle", title: "需要“精确位置”",
                    message: "当前为大致位置，无法得到可靠速度。请在设置中开启精确位置。", action: "打开设置")
         case .recordingFailed:
-            Notice(icon: "exclamationmark.triangle.fill", title: "传感器记录失败",
-                   message: "无法写入记录文件，测速不受影响时可忽略此提示。", action: nil)
+            Notice(icon: "exclamationmark.triangle.fill", title: "记录失败，测速已停止",
+                   message: model.recordingError ?? "无法保存采集数据，请检查剩余空间后重新开始。", action: nil)
         case .waitingForPermission:
             Notice(icon: "location.fill", title: "等待定位授权",
                    message: "请在系统弹窗中选择“使用App时允许”，并保持精确位置开启。", action: nil)
         case .running where state == .unavailable:
-            Notice(icon: "antenna.radiowaves.left.and.right", title: "正在获取可靠速度",
-                   message: "请保持在室外或靠窗位置，连续两次可靠定位后显示速度。", action: nil)
-        case .running where state == .predicted:
+            Notice(icon: "location.circle", title: "等待速度或静止判定",
+                   message: "正在确认运动状态。位置可用不代表速度已就绪。", action: nil)
+        case .running where state == .predicted && model.estimate?.source != .stationary:
             Notice(icon: "waveform.path.ecg", title: "信号暂时中断",
                    message: "当前为模型推算值，数秒内无新定位将停止显示。", action: nil)
         default: nil
@@ -205,6 +244,7 @@ struct SpeedometerView: View {
 // MARK: - Dial
 
 private struct DialView: View {
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
     let value: Double          // in display unit
     let hasValue: Bool
     let text: String
@@ -250,13 +290,21 @@ private struct DialView: View {
             }
             .frame(width: size, height: size)
             .position(x: geo.size.width / 2, y: geo.size.height / 2)
-            .animation(.easeOut(duration: 0.3), value: fraction)
-            .animation(.easeOut(duration: 0.3), value: text)
+            .animation(dialAnimation, value: fraction)
+            .animation(dialAnimation, value: text)
+            // Unit changes must animate even when no speed is available.
+            .animation(dialAnimation, value: unit)
+            .animation(dialAnimation, value: scale.max)
+            .animation(dialAnimation, value: scale.step)
         }
         .aspectRatio(1, contentMode: .fit)
         .accessibilityElement(children: .ignore)
         .accessibilityLabel("当前速度")
         .accessibilityValue(hasValue ? "\(text) \(unit)" : "暂无")
+    }
+
+    private var dialAnimation: Animation? {
+        reduceMotion ? nil : .easeInOut(duration: 0.35)
     }
 
     private func ticks(radius: Double, line: Double, center: Double) -> some View {
@@ -279,6 +327,7 @@ private struct DialView: View {
                 let r = outer - line * 1.25
                 Text(String(format: "%.0f", Double(m) * scale.step))
                     .font(.system(size: line * 0.62, weight: .medium)).monospacedDigit()
+                    .contentTransition(.numericText(value: Double(m) * scale.step))
                     .foregroundStyle(.secondary)
                     .position(x: center + r * cos(angle), y: center + r * sin(angle))
             }
