@@ -54,7 +54,14 @@ struct RecordingView: View {
                         List {
                             ForEach(model.deletedRecordings) { entry in
                                 HStack {
-                                    VStack(alignment: .leading) { Text(entry.title); Text(entry.url.lastPathComponent).font(.caption2).foregroundStyle(.secondary) }
+                                    VStack(alignment: .leading) {
+                                        Text(entry.title)
+                                        Text(entry.url.lastPathComponent).font(.caption2).foregroundStyle(.secondary)
+                                        if let deletedAt = entry.deletedAt {
+                                            Text("将于 \(deletedAt.addingTimeInterval(RecordingStore.trashRetention).formatted(date: .abbreviated, time: .omitted)) 永久删除")
+                                                .font(.caption2).foregroundStyle(.secondary)
+                                        }
+                                    }
                                     Spacer()
                                     Button("恢复") { perform { try model.restoreRecording(entry) } }.buttonStyle(.bordered)
                                 }
@@ -62,7 +69,12 @@ struct RecordingView: View {
                             if model.deletedRecordings.isEmpty { Text("没有已删除的记录").foregroundStyle(.secondary) }
                         }.navigationTitle("最近删除")
                     }
-                } footer: { Text("原始日志保留完整采样。可通过分享或 Finder 文件共享导出；移入最近删除后可恢复。") }
+                } footer: { Text("可通过分享或 Finder 文件共享导出原始日志。移入最近删除后 30 天内可恢复，之后自动永久删除。") }
+                Section {
+                    Toggle("记录原始 IMU", isOn: $model.recordRawIMU)
+                } header: { Text("诊断") } footer: {
+                    Text("额外保存加速度计、陀螺仪和磁力计原始数据，仅用于离线分析算法，测速不依赖它们。日志约增大 3 倍，下次开始测速时生效。")
+                }
             }
             .navigationTitle("行程记录")
             .navigationDestination(for: URL.self) { url in

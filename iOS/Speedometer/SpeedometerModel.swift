@@ -52,6 +52,10 @@ final class SpeedometerModel {
     private(set) var markers: [RecordingMarker] = []
     private(set) var lastExport: URL?
     private(set) var recordingStartedUptime: Double?
+    /// Diagnostic only: also journal raw accelerometer/gyro/magnetometer. Applies from the next start.
+    var recordRawIMU = UserDefaults.standard.bool(forKey: "recordRawIMU") {
+        didSet { UserDefaults.standard.set(recordRawIMU, forKey: "recordRawIMU") }
+    }
     private var recordingEndedUptime: Double?
 
     @ObservationIgnored private let service = SpeedometerService()
@@ -108,7 +112,7 @@ final class SpeedometerModel {
             .appendingPathComponent("session-\(Int(Date().timeIntervalSince1970))-\(UUID().uuidString.prefix(8)).jsonl")
         recordingURL = url
         resetTrip()
-        service.start(recordingTo: url)
+        service.start(recordingTo: url, rawIMU: recordRawIMU)
         if isRecording { addMarker(kind: "recordingStarted", note: "开始测速") }
     }
     func stop() {
@@ -129,6 +133,7 @@ final class SpeedometerModel {
 
     func refreshRecordings() {
         do {
+            try recordingStore.purgeTrash()
             recordings = try recordingStore.entries().filter { $0.url != recordingURL }
             deletedRecordings = try recordingStore.entries(deleted: true)
         } catch { recordingError = error.localizedDescription }

@@ -85,10 +85,16 @@ public struct FilterDiagnostics: Codable, Sendable {
 }
 
 /// Serial disk queue keeps file writes away from sensor callbacks, retaining submission order.
+/// Lines are batched so a 50 Hz stream costs one write per `flushBytes` or `flushInterval`, not one per event.
+/// A crash can lose at most the last unflushed batch; `finish()` always flushes and syncs.
 public final class SensorJournal: @unchecked Sendable {
+    public static let flushBytes = 64 * 1024
+    public static let flushInterval: Double = 1
     private let queue = DispatchQueue(label: "speedometer.sensor-journal", qos: .utility)
     private let handle: FileHandle
     private let encoder: JSONEncoder
+    private var buffer = Data()
+    private var timer: DispatchSourceTimer?
     private var failure: (any Error)?
     private var closed = false
     private let onFailure: @Sendable (String) -> Void
@@ -105,22 +111,46 @@ public final class SensorJournal: @unchecked Sendable {
         encoder = JSONEncoder()
         encoder.nonConformingFloatEncodingStrategy = .convertToString(positiveInfinity: "Infinity", negativeInfinity: "-Infinity", nan: "NaN")
         self.onFailure = onFailure
+        buffer.reserveCapacity(Self.flushBytes + 4096)
     }
 
     public func append(_ event: ReplayEvent) {
         queue.async { [self] in
             guard failure == nil, !closed else { return }
             do {
-                var line = try encoder.encode(event); line.append(10)
-                try handle.write(contentsOf: line)
-            } catch { failure = error; onFailure(String(describing: error)) }
+                buffer.append(try encoder.encode(event)); buffer.append(10)
+                if buffer.count >= Self.flushBytes { flush() }
+                else if timer == nil { scheduleFlush() }
+            } catch { fail(error) }
         }
+    }
+
+    private func scheduleFlush() {
+        let source = DispatchSource.makeTimerSource(queue: queue)
+        source.schedule(deadline: .now() + Self.flushInterval, leeway: .milliseconds(200))
+        source.setEventHandler { [weak self] in self?.flush() }
+        source.resume()
+        timer = source
+    }
+
+    private func flush() {
+        timer?.cancel(); timer = nil
+        guard failure == nil, !closed, !buffer.isEmpty else { return }
+        do { try handle.write(contentsOf: buffer); buffer.removeAll(keepingCapacity: true) }
+        catch { fail(error) }
+    }
+
+    private func fail(_ error: any Error) {
+        guard failure == nil else { return }
+        failure = error; buffer.removeAll()
+        onFailure(String(describing: error))
     }
 
     public func finish() async throws {
         try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, any Error>) in
             queue.async { [self] in
                 if !closed {
+                    flush()
                     do { try handle.synchronize() }
                     catch { if failure == nil { failure = error } }
                     do { try handle.close() }

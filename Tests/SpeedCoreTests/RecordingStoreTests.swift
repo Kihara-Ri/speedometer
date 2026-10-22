@@ -37,4 +37,22 @@ final class RecordingStoreTests: XCTestCase {
         XCTAssertThrowsError(try store.restore(store.entries(deleted: true)[0].url))
         XCTAssertEqual(try String(contentsOf: url, encoding: .utf8), "new")
     }
+
+    func testPurgeRemovesOnlyTrashOlderThanRetention() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: root) }
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        let store = RecordingStore(directory: root)
+        let now = Date()
+        for name in ["old", "recent", "kept"] { try Data(name.utf8).write(to: root.appendingPathComponent("\(name).jsonl")) }
+        try store.save(RecordingInfo(), for: root.appendingPathComponent("old.jsonl"))
+        try store.moveToTrash(root.appendingPathComponent("old.jsonl"), now: now.addingTimeInterval(-31 * 24 * 3600))
+        try store.moveToTrash(root.appendingPathComponent("recent.jsonl"), now: now.addingTimeInterval(-29 * 24 * 3600))
+        XCTAssertEqual(try store.purgeTrash(now: now), 1)
+        XCTAssertEqual(try store.entries(deleted: true).map(\.id), ["recent.jsonl"])
+        XCTAssertEqual(try store.entries().map(\.id), ["kept.jsonl"])
+        let trash = root.appendingPathComponent("RecentlyDeleted")
+        XCTAssertFalse(FileManager.default.fileExists(atPath: trash.appendingPathComponent("old.notes.json").path))
+        XCTAssertNotNil(store.availableCapacity())
+    }
 }

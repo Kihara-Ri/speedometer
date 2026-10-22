@@ -23,12 +23,17 @@ public struct RecordingEntry: Identifiable, Sendable {
     public var info: RecordingInfo
     public var createdAt: Date
     public var bytes: Int64
+    /// Set only for entries in Recently Deleted.
+    public var deletedAt: Date?
     public var id: String { url.lastPathComponent }
     public var title: String { info.title.isEmpty ? createdAt.formatted(date: .abbreviated, time: .shortened) : info.title }
 }
 
 /// Raw logs are immutable; names, notes and railway references live in separate atomic sidecars.
 public struct RecordingStore: Sendable {
+    public static let trashRetention: TimeInterval = 30 * 24 * 3600
+    /// Refuse to start a recording below this much free space; a full disk mid-trip loses the tail.
+    public static let minimumFreeBytes: Int64 = 100 * 1024 * 1024
     public let directory: URL
     public init(directory: URL) { self.directory = directory }
     private var trash: URL { directory.appendingPathComponent("RecentlyDeleted", isDirectory: true) }
@@ -51,18 +56,46 @@ public struct RecordingStore: Sendable {
         let root = deleted ? trash : directory
         guard FileManager.default.fileExists(atPath: root.path) else { return [] }
         return try FileManager.default.contentsOfDirectory(at: root,
-            includingPropertiesForKeys: [.creationDateKey, .fileSizeKey, .isRegularFileKey])
+            includingPropertiesForKeys: [.creationDateKey, .fileSizeKey, .isRegularFileKey, .contentModificationDateKey])
             .filter { $0.pathExtension == "jsonl" }
             .map { url in
-                let attributes = try url.resourceValues(forKeys: [.creationDateKey, .fileSizeKey])
+                let attributes = try url.resourceValues(forKeys: [.creationDateKey, .fileSizeKey, .contentModificationDateKey])
                 return RecordingEntry(url: url, info: try info(for: url),
-                    createdAt: attributes.creationDate ?? .distantPast, bytes: Int64(attributes.fileSize ?? 0))
+                    createdAt: attributes.creationDate ?? .distantPast, bytes: Int64(attributes.fileSize ?? 0),
+                    deletedAt: deleted ? attributes.contentModificationDate : nil)
             }.sorted { $0.createdAt > $1.createdAt }
     }
 
-    public func moveToTrash(_ url: URL) throws {
+    /// The log's modification date becomes its deletion date; its content is untouched.
+    public func moveToTrash(_ url: URL, now: Date = Date()) throws {
         try FileManager.default.createDirectory(at: trash, withIntermediateDirectories: true)
-        try movePair(url, to: trash.appendingPathComponent(url.lastPathComponent))
+        let destination = trash.appendingPathComponent(url.lastPathComponent)
+        try movePair(url, to: destination)
+        try? FileManager.default.setAttributes([.modificationDate: now], ofItemAtPath: destination.path)
+    }
+
+    /// Permanently removes Recently Deleted entries older than `trashRetention`. Returns how many were removed.
+    @discardableResult
+    public func purgeTrash(now: Date = Date()) throws -> Int {
+        var removed = 0
+        for entry in try entries(deleted: true) {
+            guard let deletedAt = entry.deletedAt, now.timeIntervalSince(deletedAt) > Self.trashRetention else { continue }
+            try FileManager.default.removeItem(at: entry.url)
+            try? FileManager.default.removeItem(at: infoURL(entry.url))
+            removed += 1
+        }
+        return removed
+    }
+
+    /// Free space the system will make available for user-initiated work, or nil if unknown.
+    public func availableCapacity() -> Int64? {
+        #if os(iOS)
+        let values = try? directory.resourceValues(forKeys: [.volumeAvailableCapacityForImportantUsageKey])
+        return values?.volumeAvailableCapacityForImportantUsage
+        #else
+        let values = try? directory.resourceValues(forKeys: [.volumeAvailableCapacityKey])
+        return values?.volumeAvailableCapacity.map(Int64.init)
+        #endif
     }
 
     public func restore(_ url: URL) throws {

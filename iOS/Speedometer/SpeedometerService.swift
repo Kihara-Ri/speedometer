@@ -30,6 +30,7 @@ final class SpeedometerService: NSObject, @preconcurrency CLLocationManagerDeleg
     private var generation = 0
     private var journalURL: URL?
     private var journalID: UUID?
+    private var recordsRawIMU = false
     private var batteryObserver: NSObjectProtocol?
     private var requested = false
     private var active = true
@@ -51,10 +52,12 @@ final class SpeedometerService: NSObject, @preconcurrency CLLocationManagerDeleg
         location.showsBackgroundLocationIndicator = true
     }
 
-    func start(recordingTo url: URL) {
+    /// `rawIMU` additionally journals the 50 Hz accelerometer/gyro and 20 Hz magnetometer streams.
+    /// Fusion never reads them; they roughly triple the log size and exist only for offline diagnosis.
+    func start(recordingTo url: URL, rawIMU: Bool = false) {
         guard !requested else { return }
         requested = true
-        do { try startRecording(to: url) }
+        do { try startRecording(to: url, rawIMU: rawIMU) }
         catch {
             requested = false
             status = .recordingFailed
@@ -74,8 +77,12 @@ final class SpeedometerService: NSObject, @preconcurrency CLLocationManagerDeleg
         if journalURL != nil { Task { _ = try? await finishRecording() } }
     }
 
-    private func startRecording(to url: URL) throws {
+    private func startRecording(to url: URL, rawIMU: Bool) throws {
         guard journalURL == nil else { return }
+        let store = RecordingStore(directory: url.deletingLastPathComponent())
+        if let free = store.availableCapacity(), free < RecordingStore.minimumFreeBytes {
+            throw RecordingSpaceError(available: free)
+        }
         let id = UUID()
         let writer = try SensorJournal(url: url) { [weak self] message in
             Task { @MainActor in
@@ -85,7 +92,7 @@ final class SpeedometerService: NSObject, @preconcurrency CLLocationManagerDeleg
                 self.onRecordingError?(message)
             }
         }
-        journalURL = url; journalID = id
+        journalURL = url; journalID = id; recordsRawIMU = rawIMU
         UIDevice.current.isBatteryMonitoringEnabled = true
         worker.setBatteryLevel(UIDevice.current.batteryLevel)
         batteryObserver = NotificationCenter.default.addObserver(forName: UIDevice.batteryLevelDidChangeNotification,
@@ -110,7 +117,11 @@ final class SpeedometerService: NSObject, @preconcurrency CLLocationManagerDeleg
             "deviceModel": UIDevice.current.model,
             "deviceHardware": hardwareID,
             "motionReferenceFrame": "xArbitraryZVertical", "requestedMotionHz": mountAxis == nil ? "50" : "20",
-            "requestedAccelerometerHz": "50", "requestedGyroHz": "50", "requestedMagnetometerHz": "20",
+            "rawIMURecorded": String(rawIMU),
+            "requestedAccelerometerHz": rawIMU ? "50" : "0", "requestedGyroHz": rawIMU ? "50" : "0",
+            "requestedMagnetometerHz": rawIMU ? "20" : "0",
+            "rawMotionResolution": "acceleration/gravity/rotationRate=1e-5; quaternion=1e-6",
+            "journalFlush": "\(SensorJournal.flushBytes) bytes or \(SensorJournal.flushInterval) s",
             "accelerometerAvailable": String(motion.isAccelerometerAvailable),
             "gyroAvailable": String(motion.isGyroAvailable),
             "magnetometerAvailable": String(motion.isMagnetometerAvailable),
@@ -249,7 +260,7 @@ final class SpeedometerService: NSObject, @preconcurrency CLLocationManagerDeleg
         motion.accelerometerUpdateInterval = 1.0 / 50
         motion.gyroUpdateInterval = 1.0 / 50
         motion.magnetometerUpdateInterval = 1.0 / 20
-        worker.startRecordingSensors(motion: motion, altimeter: altimeter, generation: generation)
+        worker.startRecordingSensors(motion: motion, altimeter: altimeter, rawIMU: recordsRawIMU, generation: generation)
     }
 
     private func stopRecordingSensors() {
@@ -266,6 +277,14 @@ final class SpeedometerService: NSObject, @preconcurrency CLLocationManagerDeleg
         case .rail(let update): onRail?(update)
         case .arrivalMarker(let marker): onArrivalMarker?(marker)
         }
+    }
+}
+
+struct RecordingSpaceError: LocalizedError {
+    var available: Int64
+    var errorDescription: String? {
+        "存储空间不足（剩余 \(ByteCountFormatter.string(fromByteCount: available, countStyle: .file))），" +
+            "至少需要 \(ByteCountFormatter.string(fromByteCount: RecordingStore.minimumFreeBytes, countStyle: .file)) 才能记录行程。"
     }
 }
 
@@ -409,8 +428,8 @@ final class FusionWorker: @unchecked Sendable {
         }
     }
 
-    func startRecordingSensors(motion: CMMotionManager, altimeter: CMAltimeter, generation expected: Int) {
-        if motion.isAccelerometerAvailable {
+    func startRecordingSensors(motion: CMMotionManager, altimeter: CMAltimeter, rawIMU: Bool, generation expected: Int) {
+        if rawIMU, motion.isAccelerometerAvailable {
             motion.startAccelerometerUpdates(to: operationQueue) { [weak self] data, error in
                 guard let self, self.generation == expected, self.journal != nil else { return }
                 if let error { self.recordError("accelerometer", error); return }
@@ -421,7 +440,7 @@ final class FusionWorker: @unchecked Sendable {
                 self.record(event)
             }
         }
-        if motion.isGyroAvailable {
+        if rawIMU, motion.isGyroAvailable {
             motion.startGyroUpdates(to: operationQueue) { [weak self] data, error in
                 guard let self, self.generation == expected, self.journal != nil else { return }
                 if let error { self.recordError("gyroscope", error); return }
@@ -432,7 +451,7 @@ final class FusionWorker: @unchecked Sendable {
                 self.record(event)
             }
         }
-        if motion.isMagnetometerAvailable {
+        if rawIMU, motion.isMagnetometerAvailable {
             motion.startMagnetometerUpdates(to: operationQueue) { [weak self] data, error in
                 guard let self, self.generation == expected, self.journal != nil else { return }
                 if let error { self.recordError("magnetometer", error); return }
@@ -494,6 +513,7 @@ final class FusionWorker: @unchecked Sendable {
         let a = data.userAcceleration, r = data.rotationRate, g = data.gravity, q = data.attitude.quaternion
         let raw = RawMotion(acceleration: [a.x, a.y, a.z], gravity: [g.x, g.y, g.z],
                             rotationRate: [r.x, r.y, r.z], quaternion: [q.x, q.y, q.z, q.w], timestamp: data.timestamp)
+            .quantized()
         var projected: MotionObservation?
         if let mountAxis {
             projected = MotionObservation(timestamp: data.timestamp,
@@ -563,8 +583,9 @@ final class FusionWorker: @unchecked Sendable {
             event.marker = marker
             publish(.arrivalMarker(marker))
         }
-        event.wallTime = Date().timeIntervalSince1970
         if !FusionPipeline.isSupplemental(event) {
+            // Wall time anchors the session to the calendar; 5 Hz ticks are plenty for that.
+            event.wallTime = Date().timeIntervalSince1970
             event.batteryLevel = batteryLevel
             event.thermalState = ProcessInfo.processInfo.thermalState.rawValue
         }

@@ -13,6 +13,15 @@ public struct RawMotion: Codable, Sendable {
         self.acceleration = acceleration; self.gravity = gravity
         self.rotationRate = rotationRate; self.quaternion = quaternion
     }
+
+    /// Rounds to a resolution far below sensor noise (~1e-3 g, ~1e-3 rad/s) so journal lines stay short.
+    /// Live capture quantizes BEFORE fusion, so replay of the stored values is still exact.
+    public func quantized() -> RawMotion {
+        // Dividing an integer by a power of ten yields the double whose shortest decimal form is short.
+        func round(_ values: [Double], _ scale: Double) -> [Double] { values.map { ($0 * scale).rounded() / scale } }
+        return RawMotion(acceleration: round(acceleration, 1e5), gravity: round(gravity, 1e5),
+                         rotationRate: round(rotationRate, 1e5), quaternion: round(quaternion, 1e6), timestamp: timestamp)
+    }
 }
 public struct ReplayEvent: Codable, Sendable {
     public var receivedAt: Double

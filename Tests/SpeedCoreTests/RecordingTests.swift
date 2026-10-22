@@ -69,4 +69,36 @@ final class RecordingTests: XCTestCase {
         XCTAssertEqual(try lines.map { try ReplayEvent.decode(Data($0.utf8)).receivedAt }, (0..<100).map(Double.init))
         XCTAssertThrowsError(try SensorJournal(url: url)) // never append a second session over an existing file
     }
+
+    func testJournalFlushesLargeBatchesAndIdleTail() async throws {
+        let url = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString + ".jsonl")
+        defer { try? FileManager.default.removeItem(at: url) }
+        let journal = try SensorJournal(url: url)
+        var marker = ReplayEvent(receivedAt: 0)
+        marker.sensorError = String(repeating: "x", count: 1000)
+        for i in 0..<100 { marker.receivedAt = Double(i); journal.append(marker) }
+        journal.append(ReplayEvent(receivedAt: 100))
+        // >64 KB went out immediately; the small tail waits for the idle flush.
+        try await Task.sleep(for: .milliseconds(300))
+        let early = try Data(contentsOf: url).count
+        XCTAssertGreaterThanOrEqual(early, SensorJournal.flushBytes)
+        try await Task.sleep(for: .seconds(SensorJournal.flushInterval + 0.5))
+        let idle = try Data(contentsOf: url)
+        XCTAssertGreaterThan(idle.count, early)
+        XCTAssertEqual(idle.split(separator: 10).count, 101)
+        try await journal.finish()
+        XCTAssertEqual(try Data(contentsOf: url), idle)
+    }
+
+    func testQuantizedMotionIsShortAndClose() throws {
+        let raw = RawMotion(acceleration: [0.012345678912345, -0.98765432109876, 1e-9],
+                            gravity: [0.1, -0.2, -0.97467943448089], rotationRate: [0.333333333333, 0, -0.5],
+                            quaternion: [0.70710678118654, 0, 0, 0.70710678118654], timestamp: 12.3456789)
+        let q = raw.quantized()
+        for (a, b) in zip(raw.acceleration + raw.rotationRate, q.acceleration + q.rotationRate) { XCTAssertEqual(a, b, accuracy: 5e-6) }
+        XCTAssertEqual(q.timestamp, raw.timestamp)
+        let json = String(decoding: try JSONEncoder().encode(q), as: UTF8.self)
+        XCTAssertTrue(json.contains("0.01235") && json.contains("0.707107") && !json.contains("0.0123456"), json)
+        XCTAssertLessThan(json.count + 40, String(decoding: try JSONEncoder().encode(raw), as: UTF8.self).count)
+    }
 }
