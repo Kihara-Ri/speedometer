@@ -98,3 +98,50 @@ final class PipelineParityTests: XCTestCase {
         XCTAssertNotNil(tick.diagnostics)
     }
 }
+
+/// The home screen integrates published tick/fix estimates; the saved report integrates every recorded
+/// estimate. Same rule on different grids, so the two trip distances must agree closely.
+final class DistanceParityTests: XCTestCase {
+    func testLiveAccumulatorMatchesSavedReportDistance() throws {
+        let encoder = JSONEncoder()
+        encoder.nonConformingFloatEncodingStrategy = .convertToString(positiveInfinity: "Infinity", negativeInfinity: "-Infinity", nan: "NaN")
+        func truth(_ t: Double) -> Double { t < 10 ? 0 : t < 30 ? 1.2 * (t - 10) : t < 80 ? 24 : max(0, 24 - 2 * (t - 80)) }
+        var events: [ReplayEvent] = []
+        var header = ReplayEvent(receivedAt: 0)
+        header.metadata = ["schemaVersion": "2", "sensorMode": "handheld"]
+        events.append(header)
+        var noise: UInt64 = 9
+        func jitter() -> Double {
+            noise = noise &* 6364136223846793005 &+ 1442695040888963407
+            return Double(noise >> 11) / 9007199254740992 - 0.5
+        }
+        for i in 1...6000 {
+            let t = Double(i) / 50
+            if i % 50 == 0 {
+                events.append(ReplayEvent(receivedAt: t + 0.3, speed: SpeedObservation(timestamp: t,
+                    speed: max(0, truth(t) + 0.6 * jitter()), speedAccuracy: 0.5, horizontalAccuracy: 5)))
+            }
+            if i % 10 == 0 { events.append(ReplayEvent(receivedAt: t + 0.01)) }
+            events.append(ReplayEvent(receivedAt: t + 0.005, rawMotion: RawMotion(acceleration: [0.05 * jitter(), 0, 0],
+                gravity: [0, 0, -1], rotationRate: [0, 0, 0.05 * jitter()], quaternion: [0, 0, 0, 1], timestamp: t)))
+        }
+        events.sort { $0.receivedAt < $1.receivedAt }
+        var pipeline = FusionPipeline()
+        var live = DistanceAccumulator()
+        var journal = Data()
+        for var event in events {
+            let output = pipeline.processForRecording(&event)
+            // SpeedometerService publishes the estimate on every tick and every location fix.
+            if event.speed != nil || (event.rawMotion == nil && event.metadata == nil) { live.ingest(output.estimate) }
+            journal.append(try encoder.encode(event)); journal.append(10)
+        }
+        let url = FileManager.default.temporaryDirectory.appendingPathComponent("distance-parity-\(UUID()).jsonl")
+        try journal.write(to: url)
+        defer { try? FileManager.default.removeItem(at: url) }
+        let report = try SessionReport.load(url: url)
+        let saved = report.distance.meters
+        XCTAssertGreaterThan(live.meters, 1500)
+        XCTAssertEqual(saved, live.meters, accuracy: live.meters * 0.002)
+        XCTAssertEqual(report.samples.last?.cumulativeMeters ?? 0, saved, accuracy: saved * 0.001)
+    }
+}
