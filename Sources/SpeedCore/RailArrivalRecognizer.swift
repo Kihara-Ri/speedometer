@@ -38,9 +38,10 @@ public struct RailArrivalUpdate: Codable, Sendable {
 /// Experimental sequence heuristic, not a calibrated train/road classifier.
 /// No speed integration, route inference, or automatic learning from individual answers.
 public struct RailArrivalRecognizer: Sendable {
-    public static let algorithmID = "rail-stop-v1-2026-10-19"
+    public static let algorithmID = "rail-stop-v2-2026-10-22"
     private enum Limits {
-        static let sampleGap = 1.5, maxAge = 1.5, stopSpeedUpper = 0.8
+        // sampleGap tolerates one missing 1 Hz fix plus delivery lag; contextGap is too short to hide a whole stop.
+        static let sampleGap = 3.0, contextGap = 10.0, maxAge = 1.5, stopSpeedUpper = 0.8
         static let cruiseSpeed = 8.0, cruiseSeconds = 15.0, minPeak = 10.0
         static let brakingSeconds = 6.0, minDrop = 7.0, stopSeconds = 4.0
         static let maxBrakePlateau = 2.0
@@ -49,6 +50,7 @@ public struct RailArrivalRecognizer: Sendable {
     }
     private var lastTime = -Double.infinity
     private var lastSpeed: SpeedObservation?
+    private var lastSpeedTime = -Double.infinity
     private var lastMotionTime = -Double.infinity
     private var quietSince: Double?
     private var humanActivity = false
@@ -94,24 +96,26 @@ public struct RailArrivalRecognizer: Sendable {
         if let raw = event.rawMotion { ingestMotion(raw, at: now) }
 
         // Clock ticks cannot extend a single low-speed sample into a sustained stop.
+        // A short outage only breaks the current run; a long one may hide a whole stop, so it breaks the context too.
         if let speed = lastSpeed, now - speed.timestamp > Limits.sampleGap {
             resolution = close(at: now, reason: .dataLost) ?? resolution
-            clearEvidence()
+            clearRun(); lastSpeed = nil
         }
-        if let stop = lastStop, now - stop > Limits.maxCycleSeconds {
-            completedRuns = 0; lastStop = nil; contextStartedAt = nil
-        }
+        if now - lastSpeedTime > Limits.contextGap { clearContext() }
+        if let stop = lastStop, now - stop > Limits.maxCycleSeconds { clearContext() }
         if let candidate = current, now - candidate.detectedAt >= Limits.promptSeconds {
             resolution = close(at: now, reason: .expired) ?? resolution
         }
 
         var created: RailArrivalCandidate?
         if let speed = event.speed {
-            guard acceptedSpeed, valid(speed, at: now), !humanActivity else {
-                resolution = close(at: now, reason: .dataLost) ?? resolution
+            if humanActivity {
+                resolution = close(at: now, reason: .humanActivity) ?? resolution
                 clearEvidence()
                 return output(resolved: resolution)
             }
+            // An isolated bad fix is skipped; if bad fixes persist, the sample gap above breaks the run.
+            guard acceptedSpeed, valid(speed, at: now) else { return output(resolved: resolution) }
             if let previous = lastSpeed, speed.timestamp <= previous.timestamp {
                 return output(resolved: resolution)
             }
@@ -123,12 +127,8 @@ public struct RailArrivalRecognizer: Sendable {
             if let previous = lastSpeed {
                 let dt = speed.timestamp - previous.timestamp
                 let change = (speed.speed - previous.speed) / dt
-                if change < -2.5 || change > 3.0 {
-                    resolution = close(at: now, reason: .dataLost) ?? resolution
-                    clearEvidence()
-                    lastSpeed = speed
-                    return output(resolved: resolution)
-                }
+                // Compared against the last plausible sample, so a single spike cannot also reject its successor.
+                if change < -2.5 || change > 3.0 { return output(resolved: resolution) }
                 if armed, speed.speed < peak - 0.5, change < -0.15 {
                     if brakingSince == nil { brakingSince = previous.timestamp }
                     lastDeceleration = speed.timestamp
@@ -168,7 +168,7 @@ public struct RailArrivalRecognizer: Sendable {
                     current = candidate; created = candidate
                 }
             }
-            lastSpeed = speed
+            lastSpeed = speed; lastSpeedTime = speed.timestamp
         }
         if let feedback = event.railFeedback, feedback.answer != .unanswered,
            current?.id == feedback.candidateID {
@@ -212,8 +212,11 @@ public struct RailArrivalRecognizer: Sendable {
         runStart = nil; cruiseSince = nil; armed = false; peak = 0
         brakingSince = nil; lastDeceleration = nil; stopSince = nil; cycleConsumed = false
     }
+    private mutating func clearContext() {
+        completedRuns = 0; lastStop = nil; contextStartedAt = nil
+    }
     private mutating func clearEvidence() {
-        clearRun(); completedRuns = 0; lastStop = nil; lastSpeed = nil; contextStartedAt = nil
+        clearRun(); clearContext(); lastSpeed = nil; lastSpeedTime = -.infinity
     }
     private func output(created: RailArrivalCandidate? = nil,
                         resolved: RailArrivalResolution? = nil) -> RailArrivalUpdate {

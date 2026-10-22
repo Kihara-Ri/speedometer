@@ -169,9 +169,50 @@ final class RailArrivalTests: XCTestCase {
         var event = ReplayEvent(receivedAt: 130)
         event.railFeedback = RailArrivalFeedback(candidateID: "unknown", answer: .confirmed)
         XCTAssertNil(recognizer.consume(event).resolved)
+        // A rejected fix is skipped: it neither confirms nor withdraws the open prompt.
         let update = recognizer.consume(sample(130, 0), acceptedSpeed: false)
-        XCTAssertEqual(update.resolved?.answer, .unanswered)
-        XCTAssertNil(update.current)
+        XCTAssertNil(update.resolved)
+        XCTAssertNotNil(update.current)
+        XCTAssertEqual(recognizer.consume(sample(131, 0)).current?.id, update.current?.id)
+    }
+
+    func testIsolatedBadFixesDuringSecondRunStillPrompt() throws {
+        // Rejected, invalid and spiking fixes, each placed during cruise or braking.
+        for (index, kind) in ["rejected", "inaccurate", "spike", "missing"].enumerated() {
+            for i in [30, 42] {
+                var recognizer = RailArrivalRecognizer()
+                _ = cycle(&recognizer, start: 0)
+                var created: [RailArrivalCandidate] = []
+                for j in 0...64 {
+                    var event = sample(Double(65 + j), j <= 12 ? Double(j) : j <= 37 ? 12 : max(0, 12 - Double(j - 37)))
+                    var accepted = true
+                    if j == i {
+                        switch kind {
+                        case "rejected": accepted = false
+                        case "inaccurate": event.speed?.speedAccuracy = 3
+                        case "spike": event.speed?.speed += 9
+                        default: event.speed = nil
+                        }
+                    }
+                    if let candidate = recognizer.consume(event, acceptedSpeed: accepted).created { created.append(candidate) }
+                }
+                XCTAssertEqual(created.count, 1, "case \(index) \(kind) at \(i)")
+                XCTAssertEqual(created.first?.stoppedAt, 114, "case \(index) \(kind) at \(i)")
+            }
+        }
+    }
+
+    func testShortOutageBreaksOnlyTheCurrentRun() throws {
+        var recognizer = RailArrivalRecognizer()
+        _ = cycle(&recognizer, start: 0)
+        // Five seconds without fixes mid-cruise: this run cannot prompt, but the context survives.
+        for j in 0...64 where !(20...24).contains(j) {
+            let speed = j <= 12 ? Double(j) : j <= 37 ? 12.0 : max(0, 12 - Double(j - 37))
+            XCTAssertNil(recognizer.consume(sample(Double(65 + j), speed)).created)
+        }
+        let candidate = try XCTUnwrap(cycle(&recognizer, start: 130).compactMap(\.created).first)
+        XCTAssertEqual(candidate.completedRuns, 2)
+        XCTAssertEqual(candidate.evidenceStartedAt, 3)
     }
 
     func testCruisingBetweenBriefSlowdownAndShortFinalBrakeCannotCountAsSustainedBraking() {
