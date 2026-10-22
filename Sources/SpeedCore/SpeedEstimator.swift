@@ -4,7 +4,7 @@ import Foundation
 /// estimate(at:) never mutates the filter, so render cadence cannot change results.
 public struct SpeedEstimator: Sendable {
     /// Written to recording headers; bump whenever estimates for the same input change.
-    public static let algorithmID = "kalman-v1-2026-10-17"
+    public static let algorithmID = "kalman-v2-2026-10-22"
     public static let stationaryAlgorithmID = "stationary-v2-2026-10-19"
     public let mode: SensorMode
     private var filter: KalmanState?
@@ -19,6 +19,9 @@ public struct SpeedEstimator: Sendable {
     private var lastResult: IngestResult?
     private var lastInnovation: Double?
     private var lastNIS: Double?
+    /// Multiplies reported GNSS variance; tracks the running NIS of steady-travel fixes, so a receiver
+    /// that understates its error is trusted less. 1 means fixes are as accurate as reported.
+    private var noiseScale = 1.0
     private var stationary = StationaryDetector()
 
     /// Shared by live capture and replay; invalid GPS velocity is never converted to zero.
@@ -29,14 +32,12 @@ public struct SpeedEstimator: Sendable {
     public func diagnostics(at now: Double) -> FilterDiagnostics {
         var predicted = filter
         if let state = filter, now >= state.time { predicted?.predict(to: now) }
-        let age = lastFix.map { max(0, now - $0.timestamp) }
-        let base = lastFix.map { max(0.35, $0.speedAccuracy) }
-        let growth = age.map { motionTrusted(at: now) ? hypot(0.35*$0, 0.12*$0*$0) : 0.75*$0*$0 }
         return FilterDiagnostics(stateTime: filter?.time, state: filter?.x, covariance: filter?.p,
             lastResult: lastResult, innovation: lastInnovation, nis: lastNIS,
             reportedSpeedAccuracy: lastFix?.speedAccuracy,
-            uncertaintyFloor: base.flatMap { b in growth.map { hypot(b, $0) } },
-            covarianceSpeedSigma: predicted.map { sqrt($0.p[0][0]) })
+            uncertaintyFloor: lastFix.map { uncertaintyFloor(fix: $0, at: now) },
+            covarianceSpeedSigma: predicted.map { sqrt($0.p[0][0]) },
+            gnssNoiseScale: filter == nil ? nil : noiseScale)
     }
 
     public init(mode: SensorMode = .handheld) { self.mode = mode }
@@ -72,15 +73,19 @@ public struct SpeedEstimator: Sendable {
         predicted.predict(to: now)
         let sigma = max(0.35, sample.speedAccuracy)
         let lag = max(0, now - sample.timestamp)
-        let variance = sigma*sigma + 4*lag*lag
+        let variance = sigma*sigma*noiseScale + 4*lag*lag
         let value = max(0, sample.speed + predicted.x[1]*lag)
         var innovation = predicted.innovation(value, h: [1,0,0], variance: variance)
         let elapsed = sample.timestamp - last.timestamp
         let physicallyPossible = abs(sample.speed - last.speed) <= 12*elapsed + 3*hypot(sigma, max(0.35, last.speedAccuracy))
         // Cruise uses a quiet process model. A plausible maneuver raises process noise,
         // preserving braking response without extrapolating ordinary GNSS jitter.
-        if physicallyPossible, abs(innovation.residual) > 2.5, var maneuver = filter {
-            maneuver.predict(to: now, jerkNoise: 4)
+        // The trigger is relative to the predicted residual spread, so noisy fixes need a larger jump.
+        let cruiseNIS = innovation.residual*innovation.residual / innovation.variance
+        let threshold = max(Tuning.maneuverResidual, Tuning.maneuverSigmas*sqrt(innovation.variance))
+        let maneuvering = physicallyPossible && abs(innovation.residual) > threshold
+        if maneuvering, var maneuver = filter {
+            maneuver.predict(to: now, jerkNoise: KalmanState.maneuverJerk)
             predicted = maneuver
             innovation = predicted.innovation(value, h: [1,0,0], variance: variance)
         }
@@ -94,6 +99,11 @@ public struct SpeedEstimator: Sendable {
                 if result == .accepted { return result }
             } else { candidate = nil; candidateCount = 0 }
             return .outlier
+        }
+        if !maneuvering {
+            // Maneuver residuals reflect the process model, not receiver noise.
+            noiseScale = min(Tuning.maximumNoiseScale,
+                             max(1, noiseScale * (1 + Tuning.noiseScaleRate*(cruiseNIS - 1))))
         }
         predicted.update(value, h: [1,0,0], variance: variance)
         filter = predicted; lastFix = sample
@@ -145,15 +155,20 @@ public struct SpeedEstimator: Sendable {
         guard age <= horizon else { return unavailable(now, age: age) }
         var predicted = state
         predicted.predict(to: now)
-        // Deliberate floor for unobserved acceleration / correlated IMU bias.
-        // Raw OS accuracies and our Gaussian model have not been field-calibrated.
-        let base = max(0.35, fix.speedAccuracy)
-        let growth = inertial ? hypot(0.35*age, 0.12*age*age) : 0.75*age*age
-        let uncertainty = max(sqrt(predicted.p[0][0]), hypot(base, growth))
+        let uncertainty = max(sqrt(predicted.p[0][0]), uncertaintyFloor(fix: fix, at: now))
         guard uncertainty.isFinite, uncertainty <= 8, predicted.x[0].isFinite else { return unavailable(now, age: age) }
         return SpeedEstimate(timestamp: now, speed: min(140, max(0, predicted.x[0])),
                              uncertainty: uncertainty, state: age <= 1 ? .measured : .predicted,
                              source: age <= 1 ? .location : (inertial ? .inertial : .model), observationAge: age)
+    }
+
+    /// Deliberate floor for unobserved acceleration / correlated IMU bias, growing with fix age.
+    /// Raw OS accuracies and our Gaussian model have not been field-calibrated.
+    private func uncertaintyFloor(fix: SpeedObservation, at now: Double) -> Double {
+        let age = max(0, now - fix.timestamp)
+        let base = max(0.35, fix.speedAccuracy)
+        let growth = motionTrusted(at: now) ? hypot(0.35*age, 0.12*age*age) : 0.75*age*age
+        return hypot(base, growth)
     }
 
     private func motionTrusted(at now: Double) -> Bool {
@@ -199,6 +214,15 @@ public struct SpeedEstimator: Sendable {
         SpeedEstimate(timestamp: now.isFinite ? now : 0, speed: nil, uncertainty: nil,
                       state: .unavailable, source: .none, observationAge: age)
     }
+}
+
+private enum Tuning {
+    /// Maneuver switch: |residual| above both an absolute floor (m/s) and this many predicted σ.
+    static let maneuverResidual = 2.5
+    static let maneuverSigmas = 2.5
+    /// EWMA weight per fix and ceiling for the GNSS variance multiplier.
+    static let noiseScaleRate = 0.1
+    static let maximumNoiseScale = 6.0
 }
 
 /// Infers a ground stop only from independent, current evidence. A quiet IMU alone

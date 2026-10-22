@@ -82,6 +82,8 @@ public struct FilterDiagnostics: Codable, Sendable {
     public var reportedSpeedAccuracy: Double?
     public var uncertaintyFloor: Double?
     public var covarianceSpeedSigma: Double?
+    /// Multiplier applied to reported GNSS speed variance (≥ 1), learned from innovation statistics.
+    public var gnssNoiseScale: Double?
 }
 
 /// Serial disk queue keeps file writes away from sensor callbacks, retaining submission order.

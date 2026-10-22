@@ -37,7 +37,8 @@
 
 ```sh
 swift test                                  # 单元测试
-swift run speed-replay --benchmark          # 合成场景基准
+swift run speed-replay --benchmark          # 合成场景基准（单种子）
+swift run -c release speed-replay --benchmark-suite   # 多种子压力套件
 swift run speed-replay /abs/path/session.jsonl > estimates.jsonl
 # 在已启动的 iOS 模拟器上核验真实 Model / Service / Journal 的行程保存流程
 python3 tools/test_app_flow.py --device SIMULATOR_UDID

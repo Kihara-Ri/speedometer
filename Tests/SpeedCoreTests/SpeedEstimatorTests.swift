@@ -220,4 +220,26 @@ final class SpeedEstimatorTests: XCTestCase {
         XCTAssertEqual(engine.ingest(MotionObservation(timestamp: 11, acceleration: .nan, rotationRate: 0), receivedAt: 11), .invalid)
         XCTAssertEqual(engine.estimate(at: 10).speed!, 20, accuracy: 0.1)
     }
+
+    func testUnderstatedGNSSAccuracyRaisesNoiseScaleAndSmoothsMore() {
+        var honest = locked(), noisy = locked()
+        var seed: UInt64 = 7
+        func jitter() -> Double {
+            seed = seed &* 6364136223846793005 &+ 1442695040888963407
+            return (Double(seed >> 11) / 9007199254740992 - 0.5) * 4   // ±2 m/s, σ ≈ 1.15
+        }
+        var honestSwing = 0.0, noisySwing = 0.0, previous: (Double, Double)?
+        for t in 11...70 {
+            let error = jitter(), time = Double(t)
+            _ = honest.ingest(observation(time, 20 + error, accuracy: 1.2), receivedAt: time)
+            _ = noisy.ingest(observation(time, 20 + error, accuracy: 0.4), receivedAt: time)
+            let pair = (honest.estimate(at: time).speed!, noisy.estimate(at: time).speed!)
+            if t > 40, let previous { honestSwing += abs(pair.0 - previous.0); noisySwing += abs(pair.1 - previous.1) }
+            previous = pair
+        }
+        XCTAssertGreaterThan(noisy.diagnostics(at: 70).gnssNoiseScale!, 3)
+        XCTAssertLessThan(honest.diagnostics(at: 70).gnssNoiseScale!, 1.5)
+        // Once learned, the understated receiver is not followed more closely than the honest one.
+        XCTAssertLessThan(noisySwing, honestSwing * 1.3)
+    }
 }

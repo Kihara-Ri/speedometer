@@ -2,6 +2,9 @@ import Foundation
 
 /// x = [speed, longitudinal acceleration, accelerometer bias].
 struct KalmanState {
+    /// Continuous white-jerk PSD (m²/s⁵) for steady travel and for a detected maneuver.
+    static let cruiseJerk = 0.2
+    static let maneuverJerk = 4.0
     var x: [Double]
     var p: [[Double]]
     var time: Double
@@ -12,7 +15,7 @@ struct KalmanState {
         self.time = time
     }
 
-    mutating func predict(to timestamp: Double, jerkNoise: Double = 0.2) {
+    mutating func predict(to timestamp: Double, jerkNoise: Double = cruiseJerk) {
         let dt = timestamp - time
         guard dt > 0 else { return }
         let f = [[1.0, dt, 0], [0, 1, 0], [0, 0, 1]]
