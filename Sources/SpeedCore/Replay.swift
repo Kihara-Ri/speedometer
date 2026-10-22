@@ -66,19 +66,21 @@ public struct ReplayOutput: Codable, Sendable {
     public var rail: RailArrivalUpdate
 }
 public enum ReplayError: Error { case nonMonotonicReceiptTime, ambiguousEvent }
-public struct SpeedReplay: Sendable {
+
+/// The single event-processing order shared by live capture and offline replay.
+/// Callers must deliver events with non-decreasing `receivedAt`, one input per event.
+public struct FusionPipeline: Sendable {
+    public let mode: SensorMode
     private var estimator: SpeedEstimator
     private var travel = TravelModeRecognizer()
     private var rail = RailArrivalRecognizer()
-    private var lastTime = -Double.infinity
-    public init(mode: SensorMode = .handheld) { estimator = SpeedEstimator(mode: mode) }
-    public mutating func consume(_ event: ReplayEvent) throws -> ReplayOutput {
-        guard event.receivedAt.isFinite, event.receivedAt >= lastTime else { throw ReplayError.nonMonotonicReceiptTime }
-        let inputs = [event.speed != nil, event.motion != nil, event.activity != nil,
-                      event.activitySource != nil, event.reset == true, event.resetSpeedOnly == true,
-                      event.railFeedback != nil].filter { $0 }.count
-        guard inputs <= 1 else { throw ReplayError.ambiguousEvent }
-        lastTime = event.receivedAt
+
+    public init(mode: SensorMode = .handheld) {
+        self.mode = mode
+        estimator = SpeedEstimator(mode: mode)
+    }
+
+    public mutating func process(_ event: ReplayEvent) -> ReplayOutput {
         if event.reset == true { estimator.reset(); travel.reset() }
         if event.resetSpeedOnly == true { estimator.reset() }
         if let source = event.activitySource { travel.setSource(source, at: event.receivedAt) }
@@ -94,5 +96,42 @@ public struct SpeedReplay: Sendable {
         return ReplayOutput(result: result, estimate: estimator.estimate(at: event.receivedAt),
                             travel: travel.advance(to: event.receivedAt),
                             rail: rail.consume(event, acceptedSpeed: result == .accepted))
+    }
+
+    public func estimate(at now: Double) -> SpeedEstimate { estimator.estimate(at: now) }
+    public func diagnostics(at now: Double) -> FilterDiagnostics { estimator.diagnostics(at: now) }
+
+    /// High-rate raw streams that carry no estimator input; recordings skip derived fields for them.
+    public static func isSupplemental(_ event: ReplayEvent) -> Bool {
+        event.accelerometer != nil || event.gyroscope != nil || event.magnetometer != nil ||
+            event.pressure != nil || (event.rawMotion != nil && event.motion == nil)
+    }
+
+    /// Processes a live event and attaches the derived fields a recording stores beside the raw input.
+    /// Replay ignores these fields as evidence, so live and replayed outputs stay comparable.
+    public mutating func processForRecording(_ event: inout ReplayEvent) -> ReplayOutput {
+        let output = process(event)
+        event.railCandidate = output.rail.created
+        event.railResolution = output.rail.resolved
+        if !Self.isSupplemental(event) {
+            event.recordedEstimate = output.estimate
+            event.diagnostics = estimator.diagnostics(at: event.receivedAt)
+        }
+        return output
+    }
+}
+
+public struct SpeedReplay: Sendable {
+    private var pipeline: FusionPipeline
+    private var lastTime = -Double.infinity
+    public init(mode: SensorMode = .handheld) { pipeline = FusionPipeline(mode: mode) }
+    public mutating func consume(_ event: ReplayEvent) throws -> ReplayOutput {
+        guard event.receivedAt.isFinite, event.receivedAt >= lastTime else { throw ReplayError.nonMonotonicReceiptTime }
+        let inputs = [event.speed != nil, event.motion != nil, event.activity != nil,
+                      event.activitySource != nil, event.reset == true, event.resetSpeedOnly == true,
+                      event.railFeedback != nil].filter { $0 }.count
+        guard inputs <= 1 else { throw ReplayError.ambiguousEvent }
+        lastTime = event.receivedAt
+        return pipeline.process(event)
     }
 }

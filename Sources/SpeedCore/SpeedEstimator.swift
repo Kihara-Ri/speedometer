@@ -3,6 +3,9 @@ import Foundation
 /// Single-owner value type; serialize all ingestion on one executor.
 /// estimate(at:) never mutates the filter, so render cadence cannot change results.
 public struct SpeedEstimator: Sendable {
+    /// Written to recording headers; bump whenever estimates for the same input change.
+    public static let algorithmID = "kalman-v1-2026-10-17"
+    public static let stationaryAlgorithmID = "stationary-v2-2026-10-19"
     public let mode: SensorMode
     private var filter: KalmanState?
     private var lastFix: SpeedObservation?
