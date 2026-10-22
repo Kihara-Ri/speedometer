@@ -4,7 +4,7 @@ import Foundation
 /// estimate(at:) never mutates the filter, so render cadence cannot change results.
 public struct SpeedEstimator: Sendable {
     /// Written to recording headers; bump whenever estimates for the same input change.
-    public static let algorithmID = "kalman-v2-2026-10-22"
+    public static let algorithmID = "kalman-v3-2026-10-22"
     public static let stationaryAlgorithmID = "stationary-v2-2026-10-19"
     public let mode: SensorMode
     private var filter: KalmanState?
@@ -22,6 +22,10 @@ public struct SpeedEstimator: Sendable {
     /// Multiplies reported GNSS variance; tracks the running NIS of steady-travel fixes, so a receiver
     /// that understates its error is trusted less. 1 means fixes are as accurate as reported.
     private var noiseScale = 1.0
+    /// Running NIS of all accepted fixes, maneuvers included. Above 1 the filter's own spread is too
+    /// small and the reported uncertainty is widened. It never narrows it: correlated receiver error
+    /// also lowers NIS, so a small value is not evidence that the estimate is better than modeled.
+    private var consistency = 1.0
     private var stationary = StationaryDetector()
 
     /// Shared by live capture and replay; invalid GPS velocity is never converted to zero.
@@ -37,7 +41,8 @@ public struct SpeedEstimator: Sendable {
             reportedSpeedAccuracy: lastFix?.speedAccuracy,
             uncertaintyFloor: lastFix.map { uncertaintyFloor(fix: $0, at: now) },
             covarianceSpeedSigma: predicted.map { sqrt($0.p[0][0]) },
-            gnssNoiseScale: filter == nil ? nil : noiseScale)
+            gnssNoiseScale: filter == nil ? nil : noiseScale,
+            uncertaintyScale: filter == nil ? nil : uncertaintyScale)
     }
 
     public init(mode: SensorMode = .handheld) { self.mode = mode }
@@ -105,6 +110,7 @@ public struct SpeedEstimator: Sendable {
             noiseScale = min(Tuning.maximumNoiseScale,
                              max(1, noiseScale * (1 + Tuning.noiseScaleRate*(cruiseNIS - 1))))
         }
+        consistency += Tuning.consistencyRate * (lastNIS! - consistency)
         predicted.update(value, h: [1,0,0], variance: variance)
         filter = predicted; lastFix = sample
         candidate = nil; candidateCount = 0
@@ -155,11 +161,15 @@ public struct SpeedEstimator: Sendable {
         guard age <= horizon else { return unavailable(now, age: age) }
         var predicted = state
         predicted.predict(to: now)
-        let uncertainty = max(sqrt(predicted.p[0][0]), uncertaintyFloor(fix: fix, at: now))
+        let uncertainty = uncertaintyScale * max(sqrt(predicted.p[0][0]), uncertaintyFloor(fix: fix, at: now))
         guard uncertainty.isFinite, uncertainty <= 8, predicted.x[0].isFinite else { return unavailable(now, age: age) }
         return SpeedEstimate(timestamp: now, speed: min(140, max(0, predicted.x[0])),
                              uncertainty: uncertainty, state: age <= 1 ? .measured : .predicted,
                              source: age <= 1 ? .location : (inertial ? .inertial : .model), observationAge: age)
+    }
+
+    private var uncertaintyScale: Double {
+        min(Tuning.maximumUncertaintyScale, max(1, consistency.squareRoot()))
     }
 
     /// Deliberate floor for unobserved acceleration / correlated IMU bias, growing with fix age.
@@ -223,6 +233,9 @@ private enum Tuning {
     /// EWMA weight per fix and ceiling for the GNSS variance multiplier.
     static let noiseScaleRate = 0.1
     static let maximumNoiseScale = 6.0
+    /// EWMA weight per accepted fix and ceiling for the output uncertainty multiplier.
+    static let consistencyRate = 0.1
+    static let maximumUncertaintyScale = 3.0
 }
 
 /// Infers a ground stop only from independent, current evidence. A quiet IMU alone

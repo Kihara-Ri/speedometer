@@ -242,4 +242,32 @@ final class SpeedEstimatorTests: XCTestCase {
         // Once learned, the understated receiver is not followed more closely than the honest one.
         XCTAssertLessThan(noisySwing, honestSwing * 1.3)
     }
+
+    func testPersistentlyLargeInnovationsWidenButNeverNarrowReportedUncertainty() throws {
+        var honest = locked(), noisy = locked(), steady = locked()
+        var seed: UInt64 = 11
+        func jitter() -> Double {
+            seed = seed &* 6364136223846793005 &+ 1442695040888963407
+            return (Double(seed >> 11) / 9007199254740992 - 0.5) * 6   // ±3 m/s, σ ≈ 1.7
+        }
+        for t in 11...70 {
+            let error = jitter(), time = Double(t)
+            _ = honest.ingest(observation(time, 20 + error, accuracy: 1.8), receivedAt: time)
+            // Beyond what the GNSS variance multiplier can absorb.
+            _ = noisy.ingest(observation(time, 20 + error, accuracy: 0.2), receivedAt: time)
+            // Exact fixes give NIS ≪ 1; that must not shrink the stated uncertainty.
+            _ = steady.ingest(observation(time, 20, accuracy: 0.5), receivedAt: time)
+        }
+        let diagnostics = noisy.diagnostics(at: 70.5)
+        let scale = try XCTUnwrap(diagnostics.uncertaintyScale)
+        XCTAssertGreaterThan(scale, 1.3)
+        XCTAssertLessThanOrEqual(scale, 3)
+        let unscaled = max(diagnostics.covarianceSpeedSigma!, diagnostics.uncertaintyFloor!)
+        XCTAssertEqual(noisy.estimate(at: 70.5).uncertainty!, scale * unscaled, accuracy: 1e-9)
+        XCTAssertLessThan(honest.diagnostics(at: 70.5).uncertaintyScale!, 1.2)
+        let quiet = steady.diagnostics(at: 70.5)
+        XCTAssertEqual(quiet.uncertaintyScale, 1)
+        XCTAssertEqual(steady.estimate(at: 70.5).uncertainty!,
+                       max(quiet.covarianceSpeedSigma!, quiet.uncertaintyFloor!), accuracy: 1e-9)
+    }
 }
