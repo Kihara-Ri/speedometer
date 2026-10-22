@@ -35,7 +35,7 @@ public struct LocationClock: Sendable {
     }
 }
 
-/// Conservative mount check: a 10° orientation change invalidates the axis until reset.
+/// Conservative mount check: a 5° orientation change invalidates the axis until reset.
 /// Vehicle turns can disable assistance too; location-only measurement remains available.
 public struct MountMonitor: Sendable {
     private var reference: [Double]?

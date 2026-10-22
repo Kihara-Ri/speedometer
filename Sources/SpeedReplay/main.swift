@@ -4,8 +4,9 @@ import SpeedCore
 func run() throws {
     let args = Array(CommandLine.arguments.dropFirst())
     if args == ["--benchmark"] { try runBenchmark(); return }
+    if args == ["--benchmark-suite"] { try runBenchmarkSuite(); return }
     guard let path = args.first, args.count <= 2, args.count == 1 || args[1] == "--mounted" else {
-        FileHandle.standardError.write(Data("Usage: speed-replay INPUT.jsonl [--mounted] | --benchmark\nOutputs one estimate per input event as JSONL.\n".utf8))
+        FileHandle.standardError.write(Data("Usage: speed-replay INPUT.jsonl [--mounted] | --benchmark | --benchmark-suite\nOutputs one estimate per input event as JSONL.\n".utf8))
         exit(64)
     }
     var replay = SpeedReplay(mode: args.contains("--mounted") ? .mounted : .handheld)

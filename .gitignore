@@ -6,3 +6,5 @@ xcuserdata/
 *.jsonl
 !Tests/Fixtures/*.jsonl
 .DS_Store
+__pycache__/
+.device-backups/
